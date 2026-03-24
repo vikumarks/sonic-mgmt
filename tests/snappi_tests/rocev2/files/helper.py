@@ -493,6 +493,7 @@ def get_stats(api, stat_name, columns=None, return_type='stat_obj'):
         # df[cols] = df[cols].apply(pd.to_numeric, errors='coerce')
         if return_type == 'print':
             logger.info("\n%s" % tabulate(df, headers="keys", tablefmt="psql"))
+            return
         elif return_type == 'df':
             return df
 
