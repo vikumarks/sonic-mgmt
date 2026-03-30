@@ -378,6 +378,10 @@ r, ".* ERR syncd#syncd: :- process_on_fdb_event: FDB notification was not sent s
 # https://github.com/sonic-net/sonic-mgmt/issues/19790
 r, ".* ERR syncd#syncd: .* SAI_API_SWITCH:sai_query_stats_capability:\d+ stats capablity not supported for object.*"
 
+# https://github.com/sonic-net/sonic-mgmt/issues/21329
+r, ".* ERR syncd\d*#syncd: :- guard: RedisReply catches system_error:.*ERR Lua redis lib command arguments must be strings or integers.*"
+r, ".* ERR syncd\d*#syncd: :- runRedisScript: Caught exception while running Redis lua script:.*ERR Lua redis lib command arguments must be strings or integers.*"
+
 # Ignore all audisp-tacplus Accounting logs
 r, ".* INFO audisp-tacplus: Audisp-tacplus: Accounting: user: .*, tty: .*, host: .*, command: .*, type: \d+, task ID: \d+"
 
@@ -423,11 +427,19 @@ r, ".*ERR pmon.*Failed to unfreeze VDM stats in contextmanager for port.*"
 # https://github.com/aristanetworks/sonic-qual.msft/issues/1156
 r, ".*ERR pmon#DomInfoUpdateTask.*Failed to get VDM basic real values for port.*"
 
+# Ignore PIE port error log on set pfc mode
+r, ".* ERR syncd#syncd: :- sendApiResponse: api SAI_COMMON_API_SET failed in syncd mode: SAI_STATUS_NOT_SUPPORTED.*"
+r, ".* ERR syncd#syncd: :- processQuadEvent: VID: oid:0x.*"
+r, ".* ERR syncd#syncd: :- processQuadEvent: attr: SAI_PORT_ATTR_PRIORITY_FLOW_CONTROL_MODE: SAI_PORT_PRIORITY_FLOW_CONTROL_MODE_COMBINED.*"
+
 # https://github.com/sonic-net/sonic-buildimage/issues/21186
 r, ".*ERR bgp\#bgpmon:\s+\*ERROR\*\s+Failed\s+with\s+rc:\d+\s+when\s+execute:\s+.*vtysh.*-c.*show\s+bgp\s+summary\s+json.*"
 
 # https://github.com/sonic-net/sonic-buildimage/issues/24966
 r, ".* ERR bgp#mgmtd.*mgmt_ds_lock: ERROR: lock already taken on DS:running by session-id.*"
+
+# https://github.com/sonic-net/sonic-mgmt/issues/16794
+r, ".* ERR bgp\d*#mgmtd.*mgmt_txn_cfg_commit_timedout.*"
 
 # This is an info log which matches the regex "kernel:.*\serr", not an err
 r, ".*ACPI.*System may be unstable or behave erratically.*"
@@ -457,3 +469,8 @@ r, ".*ERR swss#orchagent:.*SAI_API_QUEUE, status: SAI_STATUS_INVALID_PARAMETER.*
 # Ignore link-training failure status query errors during port state transitions
 # SAI cannot read LT registers while the port serdes is mid-transition
 r, ".* ERR swss\d*#orchagent:.*getPortLinkTrainingFailure: Failed to get LT failure status for .*"
+
+# https://github.com/sonic-net/sonic-mgmt/issues/19347
+r, ".* ERR auditd.*: queue to plugins is full - dropping event"
+r, ".* ERR auditd.*: message repeated .*: \[ queue to plugins is full - dropping event\]"
+r, ".* ERR auditd.*: auditd queue full reporting limit reached - ending dropped event notifications"
