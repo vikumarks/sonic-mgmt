@@ -7,7 +7,7 @@ import time
 import sys
 from tabulate import tabulate
 from ixnetwork_restpy.assistants.statistics.statviewassistant import StatViewAssistant
-from ixnetwork_restpy import Files
+# from ixnetwork_restpy import Files
 from tests.common.helpers.assertions import pytest_require, pytest_assert
 from tests.common.utilities import wait_until, wait
 
@@ -461,7 +461,7 @@ def get_stats(api, stat_name, columns=None, return_type='stat_obj'):
             return obj
         except AttributeError:
             return default
-
+    stat_obj = None
     column_headers = [
                         "flow_name", "port_tx", "port_rx", "src_qp", "dest_qp", "src_ipv4", "dest_ipv4",
                         "data_frames_tx", "data_frames_rx", "frame_delta", "data_frames_retransmitted",
@@ -502,7 +502,8 @@ def get_stats(api, stat_name, columns=None, return_type='stat_obj'):
             return
         elif return_type == 'df':
             return df
-
+    if stat_obj is None:
+        raise ValueError(f"Unsupported stat_name: {stat_name}")
     rows = [
         [deep_getattr(stat, column, None) for column in column_headers]
         for stat in stat_obj
@@ -727,7 +728,6 @@ def run_rocev2_step(
     expectations,
     no_failures=False,
 ):
-    caller_name = sys._getframe(1).f_code.co_name
     config = configure_rocev2_topology(base_config, port_config_list, topology)
     api.set_config(config)
 
@@ -749,6 +749,7 @@ def run_rocev2_step(
                 QpCount=len(peer_ips),
                 DestinationPeerNames=[rocev2_by_ip[ip] for ip in peer_ips],
             )
+    # caller_name = sys._getframe(1).f_code.co_name
     # api._ixnetwork.SaveConfig(Files(f"{caller_name}.ixncfg"))
     # ---------waiting for snappi fix: 2--------------
     start_stop(api, operation="start", op_type="protocols")
