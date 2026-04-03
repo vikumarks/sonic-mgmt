@@ -4,7 +4,7 @@ import logging
 import pandas as pd
 import numpy as np
 import time
-import sys
+
 from tabulate import tabulate
 from ixnetwork_restpy.assistants.statistics.statviewassistant import StatViewAssistant
 # from ixnetwork_restpy import Files
@@ -290,45 +290,6 @@ def configure_rocev2_topology(config, port_config_list, topology):
     return config  # Return for later use
 
 
-def wait_for(func, condition_str, interval_seconds=None, timeout_seconds=None):
-    """
-    Keeps calling the `func` until it returns true or `timeout_seconds` occurs
-    every `interval_seconds`. `condition_str` should be a constant string
-    implying the actual condition being tested.
-    Usage
-    -----
-    If we wanted to poll for current seconds to be divisible by `n`, we would
-    implement something similar to following:
-    ```
-    import time
-    def wait_for_seconds(n, **kwargs):
-        condition_str = 'seconds to be divisible by %d' % n
-        def condition_satisfied():
-            return int(time.time()) % n == 0
-        poll_until(condition_satisfied, condition_str, **kwargs)
-    ```
-    """
-    if interval_seconds is None:
-        interval_seconds = 10
-    if timeout_seconds is None:
-        timeout_seconds = 180
-    start_seconds = int(time.time())
-
-    logger.info("Waiting for %s ..." % condition_str)
-    while True:
-        res = func()
-        if res:
-            logger.info("Done waiting for %s" % condition_str)
-            break
-        if res is None:
-            raise Exception("Wait aborted for %s" % condition_str)
-        if timed_out(start_seconds, timeout_seconds):
-            msg = "Time out occurred while waiting for %s" % condition_str
-            raise Exception(msg)
-
-        time.sleep(interval_seconds)
-
-
 def wait_with_message(message, duration):
     """Displays a countdown while waiting."""
     for remaining in range(duration, 0, -1):
@@ -392,9 +353,9 @@ def start_stop(api, operation="start", op_type="protocols", waittime=10):
     api.set_control_state(cs)
 
     if op_type == "traffic" and operation == "stop":
-        wait_for(lambda: is_traffic_stopped(api), "Traffic to Stop", interval_seconds=1, timeout_seconds=180)
+        wait_until(180, 10, 0, is_traffic_stopped, api)
     elif op_type == "traffic" and operation == "start":
-        wait_for(lambda: is_traffic_running(api), "Traffic to Start", interval_seconds=10, timeout_seconds=180)
+        wait_until(180, 10, 0, is_traffic_running, api)
     else:
         wait(waittime, f"For {op_type} To {operation}")
 
@@ -480,7 +441,7 @@ def get_stats(api, stat_name, columns=None, return_type='stat_obj'):
     elif stat_name == "per_peer":
         req.rocev2_ipv4.choice = "per_peer"
         req.rocev2_ipv4.per_peer.column_names = []
-        stat_obj = api.get_metrics(req).rocev2_flow_per_qp_metrics
+        stat_obj = api.get_metrics(req).rocev2_ipv4_per_peer_metrics
 
     elif stat_name == "Port Statistics":
 
@@ -619,7 +580,7 @@ def run_assertions(df, checks, fail_fast=False, no_failures=False):
         if no_failures:
             logger.error("Note: no_failures=True, so not raising despite failures.")
         else:
-            raise AssertionError(f"{len(failures)} checks failed")
+            raise AssertionError(f"{len(failures)} checks failed. Please review the logs for details.")
 
 
 
@@ -749,6 +710,7 @@ def run_rocev2_step(
                 QpCount=len(peer_ips),
                 DestinationPeerNames=[rocev2_by_ip[ip] for ip in peer_ips],
             )
+    # import sys
     # caller_name = sys._getframe(1).f_code.co_name
     # api._ixnetwork.SaveConfig(Files(f"{caller_name}.ixncfg"))
     # ---------waiting for snappi fix: 2--------------
