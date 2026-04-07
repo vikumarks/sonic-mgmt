@@ -157,7 +157,7 @@ def configure_rocev2_topology(config, port_config_list, topology):
             "retransmission_timeout_value": 10
         }
     }
-    default_dcqcn_settings_config = {"alpha_g": 1020, "initial_alpha": 1000, "maximum_rate_decrement_at_time": 12}
+    default_dcqcn_settings_config = {"enable_dcqcn": True, "alpha_g": 1020, "initial_alpha": 1000, "maximum_rate_decrement_at_time": 12}
     default_rocev2_port_config = {"transmit_type": "target_line_rate", "target_line_rate": 100}
 
     # Build port lookup (unchanged)
@@ -207,9 +207,11 @@ def configure_rocev2_topology(config, port_config_list, topology):
         logger.info(f"RoCEv2 {tx_port_id}, Dest Ports: {peers_ids}, Dest IPs: {dest_port_ips}")
 
         # CREATE peers + QPs (unchanged)
-        peer = rocev2_int.peers.add()
-        peer.name = f"RoCEv2 {tx_port_id}"
-        peer.destination_ip_address = dest_port_ips if dest_port_ips else []
+        peer_ips = dest_port_ips or ["0.0.0.0"]
+        for dest_ip in peer_ips:
+            peer = rocev2_int.peers.add()
+            peer.name = f"RoCEv2 {tx_port_id}"
+            peer.destination_ip_address = dest_ip
 
         qps_objs[tx_port_id] = []
         for indx, qp_cfg in enumerate(qp_cfgs):
@@ -217,11 +219,8 @@ def configure_rocev2_topology(config, port_config_list, topology):
             qp.qp_name = f"QP{tx_port_id}_{indx}"
             qps_objs[tx_port_id].append((f"QP{tx_port_id}_{indx}", qp_cfg))
             qp.connection_type.choice = "reliable_connection"
-            rc = qp.connection_type.reliable_connection
-            # rc.source_qp_number = qp_cfg["qp_num"]
-            # rc.dscp = qp_cfg["dscp"]
-            # rc.ecn = qp_cfg["ecn"]
 
+            rc = qp.connection_type.reliable_connection
             rc.source_qp_number = qp_cfg.get("qp_num", default_qp_configs[indx]["qp_num"])
             rc.dscp = qp_cfg.get("dscp", default_qp_configs[indx]["dscp"])
             rc.ecn = qp_cfg.get("ecn", default_qp_configs[indx]["ecn"])
@@ -283,6 +282,7 @@ def configure_rocev2_topology(config, port_config_list, topology):
                                                                                    )
         rc_conn.retransmission_timeout_value = conn_type_cfg.get(cchoice, {}).get("retransmission_timeout_value", 10)
         dcqcn = protocol.rocev2.dcqcn_settings
+        dcqcn.enable_dcqcn = dcqcn_settings_cfg.get("enable_dcqcn", True)
         dcqcn.alpha_g = dcqcn_settings_cfg.get("alpha_g", 1020)
         dcqcn.initial_alpha = dcqcn_settings_cfg.get("initial_alpha", 1000)
         dcqcn.maximum_rate_decrement_at_time = dcqcn_settings_cfg.get("maximum_rate_decrement_at_time", 12)
@@ -294,7 +294,6 @@ def wait_with_message(message, duration):
     """Displays a countdown while waiting."""
     for remaining in range(duration, 0, -1):
         logger.info(f"{message} {remaining} seconds remaining.")
-        # sys.stdout.flush()
         time.sleep(1)
     logger.info("")  # Ensure line break after countdown.
 
@@ -316,7 +315,7 @@ def is_traffic_running(api, flow_names=[]):
     request.rocev2_flow.per_qp.column_names = flow_names
     rocev2_flow_stats = api.get_metrics(request).rocev2_flow_per_qp_metrics
     # return all([int(fs.data_tx_rate) > 0 for fs in rocev2_flow_stats])
-    return any(int(fs.data_tx_rate) > 0 for fs in rocev2_flow_stats)
+    return any(float(fs.data_tx_rate) > 0 for fs in rocev2_flow_stats)
 
 
 def is_traffic_stopped(api, flow_names=[]):
@@ -327,7 +326,7 @@ def is_traffic_stopped(api, flow_names=[]):
     request.rocev2_flow.choice = "per_qp"
     request.rocev2_flow.per_qp.column_names = flow_names
     rocev2_flow_stats = api.get_metrics(request).rocev2_flow_per_qp_metrics
-    return all([int(fs.data_tx_rate) == 0 for fs in rocev2_flow_stats])
+    return all([float(fs.data_tx_rate) == 0 for fs in rocev2_flow_stats])
 
 
 def start_stop(api, operation="start", op_type="protocols", waittime=10):
@@ -441,7 +440,7 @@ def get_stats(api, stat_name, columns=None, return_type='stat_obj'):
     elif stat_name == "per_peer":
         req.rocev2_ipv4.choice = "per_peer"
         req.rocev2_ipv4.per_peer.column_names = []
-        stat_obj = api.get_metrics(req).rocev2_ipv4_per_peer_metrics
+        stat_obj = api.get_metrics(req).rocev2_flow_per_qp_metrics
 
     elif stat_name == "Port Statistics":
 
@@ -480,204 +479,6 @@ def get_stats(api, stat_name, columns=None, return_type='stat_obj'):
         return stat_obj
 
 
-def assert_mask(
-    df,
-    mask,
-    columns,
-    description,
-    context_cols=("flow_name", "port_tx", "port_rx"),
-    context_df=None,
-    explanation=None,
-):
-    """
-    Generic assertion helper.
-
-    Contract: mask is True where the condition FAILS.
-    On pass: prints explanation (if any) and the rows checked.
-    On fail: prints explanation + offending rows, then raises.
-    """
-    if isinstance(mask, pd.Series):
-        mask = mask.to_frame()
-
-    base_df = context_df if context_df is not None else df
-
-    # Only include available context columns
-    ctx = [c for c in context_cols if c in base_df.columns]
-    show_cols = ctx + list(columns)
-
-    # FIXED: Handle scalar mask case
-    bad_mask = pd.Series([bool(mask)] * len(base_df), index=base_df.index) if np.isscalar(mask) else mask.any(axis=1)
-    bad_rows = base_df.loc[bad_mask, show_cols]
-    # Rows that were checked (for context on pass)
-    checked_rows = base_df[show_cols]
-
-    header = f"[CHECK] {description}"
-    if explanation:
-        header += f" — {explanation}"
-    logger.info(header)
-
-    if bad_rows.empty:
-        # PASS: show what we validated
-        logger.info(f"[PASS] {description} – no offending rows.")
-        if not checked_rows.empty:
-            logger.info(
-                f"[DATA] {description} – rows checked: \n"
-                f"{tabulate(checked_rows, headers='keys', tablefmt='psql')}"
-            )
-        return
-
-    # FAIL: show offending rows and raise
-    logger.error(
-        f"\033[91m[DATA] {description} – offending rows:\033[0m\n"
-        f"{tabulate(bad_rows, headers='keys', tablefmt='psql')}"
-    )
-
-    raise AssertionError(
-        f"{description} failed: \n"
-        f"{tabulate(bad_rows, headers='keys', tablefmt='psql')}"
-    )
-
-
-def run_assertions(df, checks, fail_fast=False, no_failures=False):
-    """Run all assertions, print summary, fail at end if any failed."""
-    failures = []
-
-    for i, entry in enumerate(checks, 1):
-        # Support:
-        # (mask, cols, desc)
-        # (mask, cols, desc, expl)
-        # (mask, cols, desc, expl, extra_kwargs)
-        if len(entry) == 3:
-            mask, cols, desc = entry
-            expl = None
-            extra = {}
-        elif len(entry) == 4:
-            mask, cols, desc, expl = entry
-            extra = {}
-        else:
-            mask, cols, desc, expl, extra = entry
-
-        try:
-            logger.info(f"\u2713 Check {i}: {desc}")
-            assert_mask(
-                df=df,
-                mask=mask,
-                columns=cols,
-                description=desc,
-                explanation=expl,
-                **extra,
-            )
-        except AssertionError:
-            logger.error(f"\u2717 Check {i}: {desc}")
-            failures.append((i, desc))
-            if fail_fast:
-                raise
-
-    if failures:
-        logger.error(f"\n\u274c {len(failures)}/{len(checks)} checks failed: ")
-        for i, desc in failures:
-            logger.error(f"  {i}. {desc}")
-        if no_failures:
-            logger.error("Note: no_failures=True, so not raising despite failures.")
-        else:
-            raise AssertionError(f"{len(failures)} checks failed. Please review the logs for details.")
-
-
-
-def build_common_checks(df, latency_profile):
-    return [
-        (
-            df["message_fail"].ne(0) | df["frame_delta"].ne(0),
-            ["ip_dscp", "message_tx", "message_complete_rx", "message_fail", "frame_delta"],
-            "All messages complete, no loss",
-            "message_fail=0 & frame_delta=0 required",
-        ),
-        (
-            df[["nak_tx", "nak_rx", "frame_sequence_error"]].ne(0),
-            ["ip_dscp", "nak_tx", "nak_rx", "frame_sequence_error"],
-            "No NAK/sequence errors",
-            "All NAK & sequence error counters must be 0",
-        ),
-        (
-            df["avg_latency"] > latency_profile["avg_latency_max"],
-            ["ip_dscp", "avg_latency", "max_latency"],
-            "Latency within spec",
-            f"avg_latency ≤ {latency_profile['avg_latency_max']}",
-        ),
-    ]
-
-
-def build_expectation_checks(df, ps_df, expectations):
-    checks = []
-
-    expect_pfc_queues = expectations.get("expect_pfc_queues")
-    expect_ack_queues = expectations.get("expect_ack_queues")
-    expect_no_ecn_queues = expectations.get("expect_no_ecn_queues")
-    expect_no_cnp_queues = expectations.get("expect_no_cnp_queues")
-    expect_ecn_queues = expectations.get("expect_ecn_queues")
-    expect_cnp_queues = expectations.get("expect_cnp_queues")
-    if expect_pfc_queues:
-        pfc_cols = [f"Rx Pause Priority Group {q} Frames" for q in expect_pfc_queues]
-        valid_cols = [c for c in pfc_cols if c in ps_df.columns]
-        if valid_cols:
-            checks.append((
-                ps_df[valid_cols].eq(0).any(axis=1),
-                valid_cols,
-                f"PFC on queues {expect_pfc_queues}",
-                f"{valid_cols} must all be >0",
-                dict(context_df=ps_df, context_cols=("Port Name",)),
-            ))
-    if expect_ack_queues:
-        ack_dsps = [priority_to_dscp[q] for q in expect_ack_queues]
-        checks.append((
-            ((df["ip_dscp"].isin(ack_dsps)) & (df["ack_tx"] == 0)),
-            ["ip_dscp", "ack_tx", "ack_rx"],
-            f"ACK on queues {expect_ack_queues}",
-            f"ack_tx >0 required for DSCP {ack_dsps}",
-        ))
-
-    if expect_no_ecn_queues:
-        no_ecn_dsps = [priority_to_dscp[q] for q in expect_no_ecn_queues]
-        checks.append((
-            (df["ip_dscp"].isin(no_ecn_dsps)) & (df["ecn_ce_rx"] != 0),
-            ["ip_dscp", "ecn_ce_rx"],
-            f"No ECN-CE queues {expect_no_ecn_queues}",
-            f"ecn_ce_rx ==0 required for DSCP {no_ecn_dsps}",
-        ))
-
-    if expect_no_cnp_queues:
-        no_cnp_dsps = [priority_to_dscp[q] for q in expect_no_cnp_queues]
-        checks.append((
-            (df["ip_dscp"].isin(no_cnp_dsps)) &
-            df[["cnp_tx", "cnp_rx"]].ne(0).any(axis=1),
-            ["ip_dscp", "cnp_tx", "cnp_rx"],
-            f"No CNP queues {expect_no_cnp_queues}",
-            f"cnp_tx/cnp_rx ==0 required for DSCP {no_cnp_dsps}",
-        ))
-
-    if expect_ecn_queues:
-        ecn_dsps = [priority_to_dscp[q] for q in expect_ecn_queues]
-        checks.append((
-            (df["ip_dscp"].isin(ecn_dsps)) & (df["ecn_ce_rx"] == 0),
-            ["ip_dscp", "ecn_ce_rx"],
-            f"ECN-CE on queues {expect_ecn_queues}",
-            f"ecn_ce_rx >0 required for DSCP {ecn_dsps}",
-        ))
-
-    if expect_cnp_queues:
-        cnp_dsps = [priority_to_dscp[q] for q in expect_cnp_queues]
-        checks.append((
-            (df["ip_dscp"].isin(cnp_dsps)) &
-            df[["cnp_tx", "cnp_rx"]].eq(0).all(axis=1),
-            ["ip_dscp", "cnp_tx", "cnp_rx"],
-            f"CNP on queues {expect_cnp_queues}",
-            f"cnp_tx/cnp_rx >0 required for DSCP {cnp_dsps}",
-        ))
-
-    checks.extend(expectations.get("extra_custom_checks", []))
-    return checks
-
-
 def run_rocev2_step(
     api,
     base_config,
@@ -685,13 +486,9 @@ def run_rocev2_step(
     topology,
     *,
     traffic_duration,
-    latency_profile,
-    expectations,
-    no_failures=False,
 ):
     config = configure_rocev2_topology(base_config, port_config_list, topology)
     api.set_config(config)
-
     # -------Using RestPY: waiting for snappi fix: 1-------------
     rest_rocev2s = api._ixnetwork.Topology.find().DeviceGroup.find().Ethernet.find().Ipv4.find().Rocev2.find()
     # Build index from parent IP -> rest_rocev2 object once
@@ -699,20 +496,18 @@ def run_rocev2_step(
     ipv4s = api._ixnetwork.Topology.find().DeviceGroup.find().Ethernet.find().Ipv4.find()
     rocev2_by_ip = {ip.Address.Values[0]: ip.Rocev2.find()[0].Name for ip in ipv4s}
     device_peer_map = {
-                    peer.name: peer.destination_ip_address
-                    for device in base_config.devices
-                    for interface in device.rocev2.ipv4_interfaces
-                    for peer in interface.peers
-                }
-    for rocev2, peer_ips in device_peer_map.items():
-        r = rocev2_by_name[rocev2]
-        r.update(
-                QpCount=len(peer_ips),
-                DestinationPeerNames=[rocev2_by_ip[ip] for ip in peer_ips],
-            )
-    # import sys
-    # caller_name = sys._getframe(1).f_code.co_name
-    # api._ixnetwork.SaveConfig(Files(f"{caller_name}.ixncfg"))
+            next(iter(set(peer.name for peer in interface.peers)), []):
+            [rocev2_by_ip[peer.destination_ip_address] if peer.destination_ip_address in rocev2_by_ip else "0.0.0.0"  for peer in interface.peers]
+            for device in base_config.devices
+            for interface in device.rocev2.ipv4_interfaces
+        }
+    [
+    rocev2_by_name[rocev2].update(QpCount=len(peer_ips))
+    if peer_ips != ["0.0.0.0"]
+    else rocev2_by_name[rocev2].update(QpCount=0)
+    for rocev2, peer_ips in device_peer_map.items()
+    ]
+
     # ---------waiting for snappi fix: 2--------------
     start_stop(api, operation="start", op_type="protocols")
     start_stop(api, operation="stop", op_type="protocols")
@@ -734,8 +529,40 @@ def run_rocev2_step(
     pfc_cols = [f"Rx Pause Priority Group {q} Frames"
                 for q in range(8) if f"Rx Pause Priority Group {q} Frames" in ps_df.columns]
     ps_df[pfc_cols] = ps_df[pfc_cols].apply(pd.to_numeric, errors='coerce')
+    ps_df = ps_df.rename(columns=lambda col: col.replace(" ", "_"))
+    return df, ps_df
 
-    checks = build_common_checks(df, latency_profile)
-    checks += build_expectation_checks(df, ps_df, expectations)
 
-    run_assertions(df, checks, no_failures=no_failures)
+def make_check(expr, cols, desc, msg=None, override_df=None):
+    return {"expr": expr, "cols": cols, "desc": desc, "msg": msg or desc, "override_df": override_df}
+
+def assert_queries(stat_df, checks):
+    failures = []
+
+    for i, check in enumerate(checks, 1):
+        check_df = stat_df if check.get("override_df") is None else check["override_df"]
+        expr = check["expr"]
+        desc = check["desc"]
+        cols = check.get("cols")
+        msg = check.get("msg", desc)
+
+        bad = check_df.query(expr)
+        show = bad[cols] if cols else bad
+
+        if bad.empty:
+            table = tabulate(check_df[cols], headers='keys', tablefmt='psql')
+            logger.info(f"[Check {i}][DATA] {msg} – rows checked:\n{table}")
+            logger.info(f"[Check {i}][PASS] {msg} – no offending rows")
+            continue
+
+        # Only log a short error line here, no table
+        table = tabulate(show, headers='keys', tablefmt='psql')
+        logger.info(f"[Check {i}][DATA] {msg} – rows checked:\n{table}")
+        logger.error(f"[Check {i}][FAIL] {msg}")
+        failures.append(f"{i}. {msg}\n")
+
+    if failures:
+        logger.error(f"\nchecks failed: {len(failures)}/{len(checks)}")
+        raise AssertionError(f"{len(failures)} checks failed.")
+
+    logger.info("*** ALL CHECKS PASSED ***")
