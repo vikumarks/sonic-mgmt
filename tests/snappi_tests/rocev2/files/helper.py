@@ -2,8 +2,9 @@ import pytest
 import random
 import logging
 import pandas as pd
-import numpy as np
 import time
+import collections
+import json
 
 from tabulate import tabulate
 from ixnetwork_restpy.assistants.statistics.statviewassistant import StatViewAssistant
@@ -59,6 +60,13 @@ priority_to_dscp = {
     6: 48
 }
 
+def snappi_dut_port_mapping(snappi_ports):
+
+    dut_tg_port_map = collections.defaultdict(list)
+    for intf in snappi_ports:
+        dut_tg_port_map[intf["duthost"]].append((intf["peer_port"], f"Port {intf['port_id']}"))
+    dut_tg_port_map = {duthost: dict(ports) for duthost, ports in dut_tg_port_map.items()}
+    return dut_tg_port_map
 
 def configure_rocev2_topology(config, port_config_list, topology):
     '''
@@ -265,7 +273,7 @@ def configure_rocev2_topology(config, port_config_list, topology):
         ack_cfg = conn_type_cfg.get(cchoice, {}).get("ack", {})
         if ack_cfg:
             rc_conn.ack.choice = ack_cfg.get("choice", "ip_dscp")
-            rc_conn.ack.ip_dscp.value = ack_cfg.get("ip_dscp", 59)
+            rc_conn.ack.ip_dscp.value = ack_cfg.get("ip_dscp", 48)
             rc_conn.ack.ecn_value = ack_cfg.get("ecn_value", "ect_0")
 
         # Safe nak config (if present in your user input)
@@ -306,25 +314,25 @@ def timed_out(start_seconds, timeout):
     return seconds_elapsed(start_seconds) > timeout
 
 
-def is_traffic_running(api, flow_names=[]):
+def is_traffic_running(api, flow_names=None):
     """
     Returns true if traffic in start state
     """
     request = api.metrics_request()
     request.rocev2_flow.choice = "per_qp"
-    request.rocev2_flow.per_qp.column_names = flow_names
+    request.rocev2_flow.per_qp.column_names = flow_names if flow_names else []
     rocev2_flow_stats = api.get_metrics(request).rocev2_flow_per_qp_metrics
     # return all([int(fs.data_tx_rate) > 0 for fs in rocev2_flow_stats])
     return any(float(fs.data_tx_rate) > 0 for fs in rocev2_flow_stats)
 
 
-def is_traffic_stopped(api, flow_names=[]):
+def is_traffic_stopped(api, flow_names=None):
     """
     Returns true if traffic in stop state
     """
     request = api.metrics_request()
     request.rocev2_flow.choice = "per_qp"
-    request.rocev2_flow.per_qp.column_names = flow_names
+    request.rocev2_flow.per_qp.column_names = flow_names if flow_names else []
     rocev2_flow_stats = api.get_metrics(request).rocev2_flow_per_qp_metrics
     return all([float(fs.data_tx_rate) == 0 for fs in rocev2_flow_stats])
 
@@ -486,33 +494,12 @@ def run_rocev2_step(
     topology,
     *,
     traffic_duration,
+    duthosts=None
 ):
     config = configure_rocev2_topology(base_config, port_config_list, topology)
     api.set_config(config)
-    # -------Using RestPY: waiting for snappi fix: 1-------------
-    rest_rocev2s = api._ixnetwork.Topology.find().DeviceGroup.find().Ethernet.find().Ipv4.find().Rocev2.find()
-    # Build index from parent IP -> rest_rocev2 object once
-    rocev2_by_name = {r.Name: r for r in rest_rocev2s}  # pre‑indexed here once
-    ipv4s = api._ixnetwork.Topology.find().DeviceGroup.find().Ethernet.find().Ipv4.find()
-    rocev2_by_ip = {ip.Address.Values[0]: ip.Rocev2.find()[0].Name for ip in ipv4s}
-    device_peer_map = {
-            next(iter(set(peer.name for peer in interface.peers)), []):
-            [rocev2_by_ip[peer.destination_ip_address] if peer.destination_ip_address in rocev2_by_ip else "0.0.0.0"  for peer in interface.peers]
-            for device in base_config.devices
-            for interface in device.rocev2.ipv4_interfaces
-        }
-    [
-    rocev2_by_name[rocev2].update(QpCount=len(peer_ips))
-    if peer_ips != ["0.0.0.0"]
-    else rocev2_by_name[rocev2].update(QpCount=0)
-    for rocev2, peer_ips in device_peer_map.items()
-    ]
-
-    # ---------waiting for snappi fix: 2--------------
     start_stop(api, operation="start", op_type="protocols")
-    start_stop(api, operation="stop", op_type="protocols")
-    start_stop(api, operation="start", op_type="protocols")
-
+    [duthost.command(f"sonic-clear queuecounters") for duthost in duthosts]
     start_stop(api, operation="start", op_type="traffic")
     wait_with_message("Waiting for traffic completion...", traffic_duration)
     start_stop(api, operation="stop", op_type="traffic")
@@ -529,7 +516,6 @@ def run_rocev2_step(
     pfc_cols = [f"Rx Pause Priority Group {q} Frames"
                 for q in range(8) if f"Rx Pause Priority Group {q} Frames" in ps_df.columns]
     ps_df[pfc_cols] = ps_df[pfc_cols].apply(pd.to_numeric, errors='coerce')
-    ps_df = ps_df.rename(columns=lambda col: col.replace(" ", "_"))
     return df, ps_df
 
 
@@ -545,7 +531,7 @@ def assert_queries(stat_df, checks):
         desc = check["desc"]
         cols = check.get("cols")
         msg = check.get("msg", desc)
-
+        logger.info(f"[Check {i}] {desc} – running query: {expr}")
         bad = check_df.query(expr)
         show = bad[cols] if cols else bad
 
@@ -566,3 +552,61 @@ def assert_queries(stat_df, checks):
         raise AssertionError(f"{len(failures)} checks failed.")
 
     logger.info("*** ALL CHECKS PASSED ***")
+
+
+def queue_counters(
+    snappi_dut_port_map,
+    queue_ids=None,
+    queue_cols=None
+):
+    """
+    Grab JSON queue counters from DUTs and return a DataFrame where:
+        each row is a (dut, dut_interface, snappi_port),
+        with columns like "UC3 totalpacket", "UC5 totalpacket", etc.
+
+    Args:
+        snappi_dut_port_map (dict): {duthost: {dut_interface: snappi_port, ...}, ...}
+        queue_ids (list of str, optional): e.g. ["UC3", "UC1", "MC1"]. If None, keep all queues.
+        queue_cols (list of str, optional): e.g. ["totalpacket", "droppacket"]. If None, keep all columns.
+
+    Returns:
+        pd.DataFrame with columns:
+            dut, dut_interface, snappi_port, [queue_id]_[col] per selected queue/col
+    """
+    want_specific_queues = queue_ids is not None
+    queue_ids = [] if queue_ids is None else queue_ids
+    queue_cols = [] if queue_cols is None else queue_cols
+    all_rows = []
+    for duthost, dut_snappi_ports_map in snappi_dut_port_map.items():
+        # Adjust here if your DUT object uses .name, .inventory_hostname, etc.
+        dut_name = getattr(duthost, "hostname", str(duthost))
+        json_output = duthost.shell("show queue counters --json")["stdout"]
+        queuecounters = json.loads(json_output)
+        queuecounters = {port: {q: v for q, v in counters.items() if q != 'time'} for port, counters in queuecounters.items()}
+        for dut_interface, snappi_port in dut_snappi_ports_map.items():
+            row = {
+                "dut": dut_name,
+                "dut_interface": dut_interface,
+                "snappi_port": snappi_port,
+            }
+            int_queue_counters = queuecounters[dut_interface]
+            for queue_id, queue_vals in int_queue_counters.items():
+                if want_specific_queues and queue_id not in queue_ids:
+                    continue
+                cols_to_take = list(queue_vals.keys()) if not queue_cols else queue_cols
+                for col in cols_to_take:
+                    try:
+                        row[f"{queue_id} {col}"] = int(queue_vals.get(col, "0").replace(",", ""))
+                    except (ValueError, TypeError):
+                        row[f"{queue_id} {col}"] = queue_vals.get(col, "0")
+
+            all_rows.append(row)
+
+    df = pd.DataFrame(all_rows)
+    if not df.empty:
+        # Put core keys first, then queue columns
+        key_cols = ["dut", "dut_interface", "snappi_port"]
+        queue_cols_all = [c for c in df.columns if c not in key_cols]
+        df = df[key_cols + sorted(queue_cols_all)]
+
+    return df
