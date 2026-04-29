@@ -112,8 +112,8 @@ def test_min_frame_size_no_loss(
         ixnet.Traffic.TrafficItem.find().update(**ixnet_traffic_params)
         ixnet.Traffic.FrameOrderingMode = frame_ordering_mode
 
-        # after changning frame ordering mode,
-        # need to genrate traffic again to make sure the config is applied to traffic item
+        # after changing frame ordering mode,
+        # need to generate traffic again to make sure the config is applied to traffic item
         start_stop(snappi_api, operation="start", op_type="traffic")
 
         # Verify the largest frame size passes before searching; otherwise the

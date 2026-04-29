@@ -743,7 +743,7 @@ def boundary_check(snappi_api, snappi_config, frame_bytes, line_rate, rfc2889_en
     Callers can append the dict to a DataFrame for reporting and key off `no_loss`
     to drive a binary search.
     """
-    logger.info(f"Updating framesize to: {frame_bytes} and percentLineRate to: {line_rate}")
+    logger.info(f"Framesize: {frame_bytes} and percentLineRate: {line_rate}")
 
     # Ixia-specific: kick off stateless traffic via RestPy because SNAPPI's
     # control_state path does not block until traffic is fully started.
@@ -751,7 +751,7 @@ def boundary_check(snappi_api, snappi_config, frame_bytes, line_rate, rfc2889_en
     if ixnet is None:
         pytest_assert(False, "boundary_check requires an Ixia/IxNetwork backend (snappi_api._ixnetwork)")
     ixnet.Traffic.StartStatelessTrafficBlocking()
-    wait_with_message("Running traffic for", 10)
+    wait_with_message("Running traffic for", 30)
     start_stop(snappi_api, operation="stop", op_type="traffic")
     df = get_stats(snappi_api, "Traffic Item Statistics", columns=None, return_type="df")
 
